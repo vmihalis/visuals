@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAVE OLYMPUS :: LSD TECHNO TEMPLE</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; cursor: none; }
+canvas { display: block; width: 100vw; height: 100vh; }
+#start-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: #000;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  font-family: 'Courier New', monospace;
+  cursor: pointer;
+}
+#start-overlay h1 {
+  font-size: 3vw; color: #0ff;
+  text-shadow: 0 0 20px #0ff, 0 0 60px #f0f;
+  letter-spacing: 0.5em; margin-bottom: 1em;
+  animation: flicker 0.15s infinite alternate;
+}
+#start-overlay p {
+  font-size: 1.2vw; color: #f0f;
+  text-shadow: 0 0 10px #f0f;
+  animation: pulse 1s infinite;
+}
+#start-overlay .greek {
+  font-size: 5vw; color: #ff0;
+  text-shadow: 0 0 30px #ff0, 0 0 80px #f80;
+  margin-bottom: 0.5em;
+  letter-spacing: 0.3em;
+}
+@keyframes flicker {
+  0% { opacity: 1; }
+  100% { opacity: 0.7; }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+#controls {
+  position: fixed; bottom: 20px; left: 50%;
+  transform: translateX(-50%); z-index: 50;
+  font-family: 'Courier New', monospace;
+  color: #0ff; font-size: 12px;
+  text-shadow: 0 0 5px #0ff;
+  opacity: 0.6; text-align: center;
+  pointer-events: none;
+  transition: opacity 0.5s;
+}
+</style>
+</head>
+<body>
+
+<div id="start-overlay">
+  <div class="greek">ΟΛΥΜΠΟΣ</div>
+  <h1>RAVE TEMPLE</h1>
+  <p>[ CLICK TO ENTER THE ACID PANTHEON ]</p>
+</div>
+
+<div id="controls">
+  [1-9] MODES &nbsp; [SPACE] STROBE &nbsp; [G] GREEK &nbsp; [K] KALEIDOSCOPE &nbsp; [F] FULLSCREEN &nbsp; [R] RESET
+</div>
+
+<canvas id="gl"></canvas>
+
+<script>
+// =====================================================
+// RAVE OLYMPUS — CAMERA-REACTIVE LSD TECHNO VISUALIZER
+// =====================================================
+
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+if (!gl) { alert('WebGL not supported'); }
+
+// --- State ---
+const state = {
+  time: 0,          // wall clock (only used for smooth decay)
+  motionTime: 0,    // ONLY advances when you move — drives ALL visuals
+  mode: 1,
+  kaleidoscope: 6,
+  kaleidoscopeOn: true,
+  greekPattern: true,
+  strobeOn: false,
+  feedbackAmount: 0.85,
+  colorShift: 0.0,
+  distortion: 1.5,
+  zoom: 1.0,
+  mouseX: 0.5,
+  mouseY: 0.5,
+  motionAmount: 0.0,
+  bassHit: 0,
+};
+
+// --- Webcam ---
+let videoReady = false;
+const video = document.createElement('video');
+video.setAttribute('playsinline', '');
+video.setAttribute('autoplay', '');
+video.muted = true;
+
+async function initCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    videoReady = true;
+  } catch (e) {
+    console.warn('Camera not available, using generated patterns', e);
+  }
+}
+
+// --- Shaders ---
+const vertSrc = `
+  attribute vec2 a_pos;
+  varying vec2 v_uv;
+  void main() {
+    v_uv = a_pos * 0.5 + 0.5;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+  }
+`;
+
+const fragSrc = `
+  precision highp float;
+  varying vec2 v_uv;
+
+  uniform sampler2D u_cam;
+  uniform sampler2D u_prev;
+  uniform float u_time;
+  uniform float u_mode;
+  uniform float u_kaleidoscope;
+  uniform float u_kaleidoscopeOn;
+  uniform float u_greek;
+  uniform float u_strobe;
+  uniform float u_feedback;
+  uniform float u_colorShift;
+  uniform float u_distortion;
+  uniform float u_zoom;
+  uniform vec2 u_mouse;
+  uniform vec2 u_resolution;
+  uniform float u_motion;
+  uniform float u_bassHit;
+  uniform float u_hasCam;
+
+  #define PI 3.14159265359
+  #define TAU 6.28318530718
+
+  // --- Noise ---
+  float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+  }
+
+  float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
+
+  float fbm(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+    for (int i = 0; i < 5; i++) {
+      v += a * noise(p);
+      p = rot * p * 2.0;
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  // --- Greek Meander / Key Pattern ---
+  float greekKey(vec2 uv, float scale) {
+    vec2 p = fract(uv * scale);
+    float s = 1.0 / 8.0;
+    float line = 0.0;
+
+    // Outer border
+    if (p.x < s || p.x > 1.0 - s || p.y < s || p.y > 1.0 - s) line = 1.0;
+
+    // Inner spiral segments of meander
+    vec2 q = p;
+    if (q.x > s && q.x < 0.5 && q.y > 3.0*s && q.y < 4.0*s) line = 1.0;
+    if (q.x > 3.0*s && q.x < 4.0*s && q.y > 3.0*s && q.y < 6.0*s) line = 1.0;
+    if (q.x > 4.0*s && q.x < 7.0*s && q.y > 5.0*s && q.y < 6.0*s) line = 1.0;
+    if (q.x > 6.0*s && q.x < 7.0*s && q.y > 2.0*s && q.y < 6.0*s) line = 1.0;
+    if (q.x > 4.0*s && q.x < 7.0*s && q.y > 2.0*s && q.y < 3.0*s) line = 1.0;
+
+    return line;
+  }
+
+  // --- Column shape ---
+  float greekColumn(vec2 uv, float x, float width) {
+    float col = smoothstep(width, width * 0.9, abs(uv.x - x));
+    // Fluting
+    float flute = sin(((uv.x - x) / width) * 20.0 * PI) * 0.5 + 0.5;
+    col *= mix(0.7, 1.0, flute);
+    // Capital
+    float capY = 0.85;
+    if (uv.y > capY) {
+      col *= smoothstep(width * 1.5, width * 1.4, abs(uv.x - x));
+      col *= smoothstep(capY, capY + 0.01, uv.y);
+    }
+    // Base
+    float baseY = 0.1;
+    if (uv.y < baseY) {
+      col *= smoothstep(width * 1.3, width * 1.2, abs(uv.x - x));
+    }
+    return col;
+  }
+
+  // --- Kaleidoscope ---
+  vec2 kaleidoscope(vec2 uv, float segments) {
+    vec2 c = uv - 0.5;
+    float angle = atan(c.y, c.x);
+    float radius = length(c);
+    float segAngle = TAU / segments;
+    angle = mod(angle, segAngle);
+    angle = abs(angle - segAngle * 0.5);
+    return vec2(cos(angle), sin(angle)) * radius + 0.5;
+  }
+
+  // --- Edge detection ---
+  float edges(sampler2D tex, vec2 uv, vec2 texel) {
+    float tl = length(texture2D(tex, uv + vec2(-texel.x, texel.y)).rgb);
+    float t  = length(texture2D(tex, uv + vec2(0.0, texel.y)).rgb);
+    float tr = length(texture2D(tex, uv + vec2(texel.x, texel.y)).rgb);
+    float l  = length(texture2D(tex, uv + vec2(-texel.x, 0.0)).rgb);
+    float r  = length(texture2D(tex, uv + vec2(texel.x, 0.0)).rgb);
+    float bl = length(texture2D(tex, uv + vec2(-texel.x, -texel.y)).rgb);
+    float b  = length(texture2D(tex, uv + vec2(0.0, -texel.y)).rgb);
+    float br = length(texture2D(tex, uv + vec2(texel.x, -texel.y)).rgb);
+    float gx = -tl - 2.0*l - bl + tr + 2.0*r + br;
+    float gy = -tl - 2.0*t - tr + bl + 2.0*b + br;
+    return sqrt(gx*gx + gy*gy);
+  }
+
+  // --- HSV to RGB ---
+  vec3 hsv2rgb(vec3 c) {
+    vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
+    return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+  }
+
+  void main() {
+    vec2 uv = v_uv;
+    vec2 texel = 1.0 / u_resolution;
+    float t = u_time;
+
+    // --- Zoom toward center with mouse influence ---
+    vec2 center = mix(vec2(0.5), u_mouse, 0.3);
+    uv = (uv - center) / u_zoom + center;
+
+    // --- Distortion — scales directly with motion, zero when still ---
+    float dist = u_distortion * u_motion * (1.0 + u_bassHit * 2.0);
+    vec2 warp = vec2(
+      fbm(uv * 3.0 + t * 0.3) - 0.5,
+      fbm(uv * 3.0 + t * 0.3 + 100.0) - 0.5
+    ) * dist * 0.2;
+    uv += warp;
+
+    // --- Kaleidoscope ---
+    vec2 kalUv = uv;
+    if (u_kaleidoscopeOn > 0.5) {
+      kalUv = kaleidoscope(uv, u_kaleidoscope);
+    }
+
+    // --- Camera sampling with chromatic aberration ---
+    float aberration = 0.012 * u_motion * (1.0 + u_bassHit * 2.0);
+    vec3 camColor = vec3(0.0);
+    if (u_hasCam > 0.5) {
+      // Mirror horizontally for natural feel
+      vec2 camUv = vec2(1.0 - kalUv.x, kalUv.y);
+      camColor.r = texture2D(u_cam, camUv + vec2(aberration, 0.0)).r;
+      camColor.g = texture2D(u_cam, camUv).g;
+      camColor.b = texture2D(u_cam, camUv - vec2(aberration, 0.0)).b;
+    } else {
+      // Generative fallback
+      camColor = vec3(
+        fbm(kalUv * 4.0 + t * 0.5),
+        fbm(kalUv * 4.0 + t * 0.5 + 50.0),
+        fbm(kalUv * 4.0 + t * 0.5 + 100.0)
+      );
+    }
+
+    // --- Camera luminance for reactivity ---
+    float lum = dot(camColor, vec3(0.299, 0.587, 0.114));
+    float edgeVal = edges(u_cam, vec2(1.0 - kalUv.x, kalUv.y), texel * 2.0);
+
+    // --- Previous frame (feedback) — only rotates/zooms when moving ---
+    vec2 fbUv = uv;
+    vec2 fc = fbUv - 0.5;
+    // Rotation and zoom scale with motion
+    float fbAngle = 0.03 * u_motion;
+    float cs = cos(fbAngle), sn = sin(fbAngle);
+    fc = mat2(cs, -sn, sn, cs) * fc;
+    // Zoom toward center driven by motion
+    fc *= 1.0 - 0.008 * u_motion;
+    fbUv = fc + 0.5;
+    vec3 prev = texture2D(u_prev, fbUv).rgb;
+    // Gentle decay when still so trails fade slowly, not snap to black
+    prev *= mix(0.985, 1.0, smoothstep(0.0, 0.2, u_motion));
+
+    // ===========================================
+    // BASE LAYER: dark mirror of yourself when still
+    // ===========================================
+    // Motion factor: 0 when still, 1 when moving hard
+    float m = smoothstep(0.0, 0.3, u_motion);
+
+    // When still you see a dim tinted version of yourself
+    vec3 baseMirror = camColor * 0.2;
+
+    vec3 color = vec3(0.0);
+    float hueBase = u_colorShift + t * 0.05;
+
+    // --- MODE 1: NEON EDGE RAVE ---
+    if (u_mode < 1.5) {
+      float e = edgeVal * 3.0;
+      vec3 neon = hsv2rgb(vec3(hueBase + lum * 0.5 + edgeVal * 0.3, 1.0, e));
+      color = neon + camColor * 0.3;
+      color += prev * u_feedback * 0.7;
+    }
+
+    // --- MODE 2: ACID MELT ---
+    else if (u_mode < 2.5) {
+      vec2 acidUv = kalUv + vec2(sin(kalUv.y * 20.0 + t * 3.0), cos(kalUv.x * 20.0 + t * 2.5)) * 0.03 * (1.0 + lum);
+      vec3 acid = camColor;
+      acid = floor(acid * 4.0 + 0.5) / 4.0;
+      float h = hueBase + lum * 0.8 + length(kalUv - 0.5) * 0.5;
+      acid *= hsv2rgb(vec3(h, 0.8, 1.2));
+      color = acid + prev * u_feedback * 0.6;
+    }
+
+    // --- MODE 3: GREEK TEMPLE VOID ---
+    else if (u_mode < 3.5) {
+      vec3 base = mix(vec3(0.02, 0.01, 0.08), vec3(0.8, 0.7, 0.2),
+                       edgeVal * 2.0 + lum * 0.3);
+      float cols = 0.0;
+      for (float i = 0.0; i < 5.0; i++) {
+        float x = 0.15 + i * 0.175;
+        cols += greekColumn(v_uv, x, 0.03 + sin(t + i) * 0.005);
+      }
+      base += vec3(0.6, 0.5, 0.1) * cols * 0.3;
+      float mk = greekKey(v_uv + vec2(t * 0.02, 0.0), 8.0 + sin(t * 0.5) * 2.0);
+      base += vec3(0.9, 0.8, 0.3) * mk * 0.4;
+      color = base + prev * u_feedback * 0.5;
+    }
+
+    // --- MODE 4: TECHNO GRID ---
+    else if (u_mode < 4.5) {
+      vec2 gridUv = kalUv * 20.0;
+      vec2 gridId = floor(gridUv);
+      vec2 gridF = fract(gridUv) - 0.5;
+      float gridLine = min(abs(gridF.x), abs(gridF.y));
+      gridLine = smoothstep(0.02, 0.05, gridLine);
+      float cellLum = lum;
+      float pulse = sin(t * 8.0 + gridId.x * 0.5 + gridId.y * 0.7) * 0.5 + 0.5;
+      vec3 cellColor = hsv2rgb(vec3(hueBase + hash(gridId) * 0.5, 0.9, cellLum * pulse * 2.0));
+      color = cellColor * (1.0 - gridLine * 0.7);
+      color += vec3(0.0, 1.0, 1.0) * (1.0 - gridLine) * 0.3;
+      color += prev * u_feedback * 0.5;
+    }
+
+    // --- MODE 5: FRACTAL FEEDBACK TUNNEL ---
+    else if (u_mode < 5.5) {
+      vec2 tc = kalUv - 0.5;
+      float angle = atan(tc.y, tc.x);
+      float radius = length(tc);
+      float tunnel = 1.0 / (radius + 0.1) + t * 2.0;
+      vec3 tunnelCol = hsv2rgb(vec3(hueBase + tunnel * 0.1 + angle / TAU, 0.9, 0.8));
+      tunnelCol *= camColor * 2.0;
+      tunnelCol += vec3(edgeVal) * vec3(1.0, 0.0, 1.0);
+      color = tunnelCol + prev * u_feedback * 0.8;
+    }
+
+    // --- MODE 6: OLYMPUS DISCO ---
+    else if (u_mode < 6.5) {
+      vec2 sc = kalUv - 0.5;
+      float a = atan(sc.y, sc.x);
+      float rays = sin(a * 12.0 + t * 5.0) * 0.5 + 0.5;
+      rays *= sin(a * 7.0 - t * 3.0) * 0.5 + 0.5;
+      float r = length(sc);
+      vec3 godRay = hsv2rgb(vec3(hueBase + a / TAU + r, 1.0, rays * (1.0 - r)));
+      godRay += camColor * edgeVal * 3.0;
+      float bolt = fbm(vec2(a * 3.0, t * 10.0)) > 0.65 ? 1.0 : 0.0;
+      bolt *= smoothstep(0.4, 0.1, r);
+      godRay += vec3(1.0, 0.95, 0.8) * bolt;
+      color = godRay + prev * u_feedback * 0.65;
+    }
+
+    // --- MODE 7: PURE LSD ---
+    else if (u_mode < 7.5) {
+      vec2 lsdUv = kalUv;
+      lsdUv += vec2(fbm(lsdUv * 5.0 + t), fbm(lsdUv * 5.0 + t + 50.0)) * 0.2;
+      lsdUv += vec2(fbm(lsdUv * 8.0 - t * 0.7), fbm(lsdUv * 8.0 - t * 0.7 + 80.0)) * 0.1;
+      vec3 lsd = vec3(
+        sin(lsdUv.x * 30.0 + t * 2.0) * 0.5 + 0.5,
+        sin(lsdUv.y * 25.0 + t * 1.7 + 2.0) * 0.5 + 0.5,
+        sin((lsdUv.x + lsdUv.y) * 20.0 + t * 2.3 + 4.0) * 0.5 + 0.5
+      );
+      lsd *= camColor + 0.5;
+      lsd = pow(lsd, vec3(0.7));
+      color = lsd + prev * u_feedback * 0.75;
+    }
+
+    // --- MODE 8: MINOTAUR LABYRINTH ---
+    else if (u_mode < 8.5) {
+      vec2 mp = kalUv * 10.0;
+      vec2 mi = floor(mp);
+      vec2 mf = fract(mp) - 0.5;
+      float h1 = step(0.5, hash(mi));
+      float wall = 0.0;
+      if (h1 > 0.5) wall = max(wall, 1.0 - smoothstep(0.0, 0.08, abs(mf.x + mf.y)));
+      else wall = max(wall, 1.0 - smoothstep(0.0, 0.08, abs(mf.x - mf.y)));
+      vec3 mazeCol = hsv2rgb(vec3(hueBase + hash(mi) * 0.3, 0.8, wall * 0.9 + lum * 0.5));
+      mazeCol += edgeVal * vec3(1.0, 0.0, 0.5) * 2.0;
+      color = mazeCol + prev * u_feedback * 0.6;
+    }
+
+    // --- MODE 9: ALL GODS CHAOS ---
+    else {
+      float e = edgeVal * 4.0;
+      vec3 c1 = hsv2rgb(vec3(hueBase + lum + e * 0.2, 1.0, e * lum * 3.0));
+      vec2 sc2 = kalUv - 0.5;
+      float a2 = atan(sc2.y, sc2.x);
+      float rays2 = sin(a2 * 8.0 + t * 6.0) * sin(a2 * 13.0 - t * 4.0);
+      vec3 c2 = hsv2rgb(vec3(hueBase + a2/TAU, 1.0, abs(rays2) * (1.0 - length(sc2))));
+      c2 *= camColor * 3.0;
+      float mk2 = greekKey(v_uv + vec2(sin(t) * 0.1, cos(t * 0.7) * 0.1), 6.0 + sin(t) * 3.0);
+      c2 += vec3(1.0, 0.85, 0.2) * mk2 * 0.5;
+      color = mix(c1, c2, sin(t * 0.3) * 0.5 + 0.5);
+      color += prev * u_feedback * 0.8;
+    }
+
+    // Blend: still = dark mirror, moving = full effects
+    color = mix(baseMirror, color, m);
+
+    // ===========================================
+    // GLOBAL POST-PROCESSING
+    // ===========================================
+
+    // --- Greek pattern overlay ---
+    if (u_greek > 0.5) {
+      float border = 0.0;
+      // Top and bottom meander borders
+      float borderY = 0.07;
+      if (v_uv.y < borderY || v_uv.y > 1.0 - borderY) {
+        float mk = greekKey(vec2(v_uv.x + t * 0.05, v_uv.y * 8.0), 12.0);
+        border = mk;
+      }
+      color += vec3(0.9, 0.8, 0.2) * border * 0.6;
+    }
+
+    // --- Strobe (only fires when moving) ---
+    if (u_strobe > 0.5 && u_motion > 0.05) {
+      float strobe = step(0.92, sin(t * 30.0));
+      color = mix(color, vec3(1.0), strobe * 0.8 * u_motion);
+    }
+
+    // --- Motion pulse (replaces auto BPM — only pulses when you move) ---
+    color *= 1.0 + u_bassHit * 0.6;
+
+    // --- Vignette ---
+    float vig = 1.0 - length((v_uv - 0.5) * 1.3);
+    vig = smoothstep(0.0, 0.7, vig);
+    color *= vig;
+
+    // --- Scanlines ---
+    float scan = sin(v_uv.y * u_resolution.y * 0.8) * 0.04;
+    color -= scan;
+
+    // --- Clamp and gamma ---
+    color = clamp(color, 0.0, 2.0);
+    color = pow(color, vec3(0.9));
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+`;
+
+// --- Compile shader ---
+function compileShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(s));
+    return null;
+  }
+  return s;
+}
+
+function createProgram(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, vs);
+  gl.attachShader(p, fs);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(p));
+    return null;
+  }
+  return p;
+}
+
+const vert = compileShader(vertSrc, gl.VERTEX_SHADER);
+const frag = compileShader(fragSrc, gl.FRAGMENT_SHADER);
+const program = createProgram(vert, frag);
+gl.useProgram(program);
+
+// --- Fullscreen quad ---
+const quad = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(program, 'a_pos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+// --- Uniforms ---
+const uniforms = {};
+['u_cam','u_prev','u_time','u_mode','u_kaleidoscope','u_kaleidoscopeOn',
+ 'u_greek','u_strobe','u_feedback','u_colorShift','u_distortion','u_zoom',
+ 'u_mouse','u_resolution','u_motion','u_bassHit','u_hasCam'].forEach(name => {
+  uniforms[name] = gl.getUniformLocation(program, name);
+});
+
+// --- Textures ---
+function createTexture() {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  return tex;
+}
+
+const camTex = createTexture();
+const fbTexA = createTexture();
+const fbTexB = createTexture();
+
+// Init feedback textures
+[fbTexA, fbTexB].forEach(tex => {
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0,0,0,255]));
+});
+
+// Framebuffers for ping-pong
+function createFB(tex) {
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  return fb;
+}
+
+let fbA, fbB;
+let pingPong = 0;
+let prevFrame = null;
+let lastCamData = null;
+
+// --- Resize ---
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+
+  // Resize feedback textures
+  [fbTexA, fbTexB].forEach(tex => {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  });
+
+  fbA = createFB(fbTexA);
+  fbB = createFB(fbTexB);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Motion detection (per-pixel diff for accuracy) ---
+const motionCanvas = document.createElement('canvas');
+motionCanvas.width = 64;
+motionCanvas.height = 48;
+const motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
+let prevFrameData = null;
+
+function detectMotion() {
+  if (!videoReady) return 0;
+  motionCtx.drawImage(video, 0, 0, 64, 48);
+  const imageData = motionCtx.getImageData(0, 0, 64, 48);
+  const data = imageData.data;
+
+  if (!prevFrameData) {
+    prevFrameData = new Uint8Array(data);
+    return 0;
+  }
+
+  // Per-pixel luminance diff
+  let totalDiff = 0;
+  const pixelCount = data.length / 4;
+  for (let i = 0; i < data.length; i += 4) {
+    const lumCurr = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+    const lumPrev = prevFrameData[i] * 0.299 + prevFrameData[i+1] * 0.587 + prevFrameData[i+2] * 0.114;
+    totalDiff += Math.abs(lumCurr - lumPrev);
+  }
+
+  // Store current frame
+  prevFrameData.set(data);
+
+  // Normalize: average pixel diff / 255
+  const avgDiff = totalDiff / pixelCount / 255;
+  // Scale up for sensitivity — threshold low values to kill noise
+  const motion = Math.max(0, avgDiff - 0.008) * 15;
+  return Math.min(motion, 1.0);
+}
+
+// --- Input ---
+document.addEventListener('mousemove', e => {
+  state.mouseX = e.clientX / window.innerWidth;
+  state.mouseY = 1.0 - e.clientY / window.innerHeight;
+});
+
+document.addEventListener('keydown', e => {
+  const key = e.key;
+  if (key >= '1' && key <= '9') state.mode = parseInt(key);
+  if (key === ' ') { e.preventDefault(); state.strobeOn = !state.strobeOn; }
+  if (key === 'g' || key === 'G') state.greekPattern = !state.greekPattern;
+  if (key === 'k' || key === 'K') {
+    state.kaleidoscopeOn = !state.kaleidoscopeOn;
+    if (state.kaleidoscopeOn) {
+      state.kaleidoscope = [4, 6, 8, 12, 16][Math.floor(Math.random() * 5)];
+    }
+  }
+  if (key === 'f' || key === 'F') {
+    if (!document.fullscreenElement) canvas.requestFullscreen();
+    else document.exitFullscreen();
+  }
+  if (key === 'r' || key === 'R') {
+    state.mode = 1;
+    state.kaleidoscope = 6;
+    state.kaleidoscopeOn = true;
+    state.greekPattern = true;
+    state.strobeOn = false;
+    state.feedbackAmount = 0.85;
+    state.colorShift = 0.0;
+    state.distortion = 1.5;
+    state.zoom = 1.0;
+    state.motionTime = 0;
+  }
+  if (key === 'ArrowUp') state.feedbackAmount = Math.min(state.feedbackAmount + 0.05, 0.98);
+  if (key === 'ArrowDown') state.feedbackAmount = Math.max(state.feedbackAmount - 0.05, 0.0);
+  if (key === 'ArrowLeft') state.colorShift -= 0.05;
+  if (key === 'ArrowRight') state.colorShift += 0.05;
+  if (key === '+' || key === '=') state.distortion = Math.min(state.distortion + 0.2, 5.0);
+  if (key === '-') state.distortion = Math.max(state.distortion - 0.2, 0.0);
+  if (key === 'z' || key === 'Z') state.zoom = Math.max(state.zoom - 0.05, 0.3);
+  if (key === 'x' || key === 'X') state.zoom = Math.min(state.zoom + 0.05, 3.0);
+});
+
+// Mouse wheel for kaleidoscope segments
+document.addEventListener('wheel', e => {
+  if (state.kaleidoscopeOn) {
+    if (e.deltaY < 0) state.kaleidoscope = Math.min(state.kaleidoscope + 1, 32);
+    else state.kaleidoscope = Math.max(state.kaleidoscope - 1, 2);
+  }
+});
+
+// --- Start ---
+const overlay = document.getElementById('start-overlay');
+overlay.addEventListener('click', () => {
+  overlay.style.display = 'none';
+  initCamera();
+  // Hide controls after 5s
+  setTimeout(() => {
+    document.getElementById('controls').style.opacity = '0';
+  }, 8000);
+});
+
+// --- Render loop ---
+let lastTime = 0;
+let motionSmooth = 0;
+let motionDetectCounter = 0;
+
+function render(now) {
+  requestAnimationFrame(render);
+
+  const dt = Math.min((now - lastTime) / 1000, 0.1);
+  lastTime = now;
+  state.time += dt;
+
+  // Motion detection every ~15fps
+  motionDetectCounter += dt;
+  if (motionDetectCounter > 1/15) {
+    motionDetectCounter = 0;
+    const rawMotion = detectMotion();
+    // Smooth motion: fast attack, slow decay
+    if (rawMotion > motionSmooth) {
+      motionSmooth = motionSmooth * 0.3 + rawMotion * 0.7; // fast attack
+    } else {
+      motionSmooth = motionSmooth * 0.92 + rawMotion * 0.08; // slow decay
+    }
+    state.motionAmount = motionSmooth;
+  }
+
+  // CORE: motionTime only advances proportional to movement
+  // More movement = faster visual evolution
+  state.motionTime += dt * motionSmooth * 3.0;
+
+  // Bass hit is driven by motion spikes, not auto BPM
+  // Big movements create impulse hits that decay
+  state.bassHit = Math.pow(motionSmooth, 2.0);
+
+  // Update camera texture
+  if (videoReady) {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, camTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+  }
+
+  // Determine ping-pong
+  const currentFB = pingPong === 0 ? fbA : fbB;
+  const currentTex = pingPong === 0 ? fbTexA : fbTexB;
+  const prevTex = pingPong === 0 ? fbTexB : fbTexA;
+
+  // Bind textures
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, camTex);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, prevTex);
+
+  // Set uniforms
+  gl.uniform1i(uniforms.u_cam, 0);
+  gl.uniform1i(uniforms.u_prev, 1);
+  gl.uniform1f(uniforms.u_time, state.motionTime);
+  gl.uniform1f(uniforms.u_mode, state.mode);
+  gl.uniform1f(uniforms.u_kaleidoscope, state.kaleidoscope);
+  gl.uniform1f(uniforms.u_kaleidoscopeOn, state.kaleidoscopeOn ? 1.0 : 0.0);
+  gl.uniform1f(uniforms.u_greek, state.greekPattern ? 1.0 : 0.0);
+  gl.uniform1f(uniforms.u_strobe, state.strobeOn ? 1.0 : 0.0);
+  gl.uniform1f(uniforms.u_feedback, state.feedbackAmount);
+  gl.uniform1f(uniforms.u_colorShift, state.colorShift);
+  gl.uniform1f(uniforms.u_distortion, state.distortion);
+  gl.uniform1f(uniforms.u_zoom, state.zoom);
+  gl.uniform2f(uniforms.u_mouse, state.mouseX, state.mouseY);
+  gl.uniform2f(uniforms.u_resolution, canvas.width, canvas.height);
+  gl.uniform1f(uniforms.u_motion, state.motionAmount);
+  gl.uniform1f(uniforms.u_bassHit, state.bassHit);
+  gl.uniform1f(uniforms.u_hasCam, videoReady ? 1.0 : 0.0);
+
+  // Render to framebuffer (for feedback)
+  gl.bindFramebuffer(gl.FRAMEBUFFER, currentFB);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // Render to screen
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, currentTex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  pingPong = 1 - pingPong;
+}
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
